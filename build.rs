@@ -46,7 +46,6 @@ fn main() {
 
         extra_clang_args.push("-I/opt/homebrew/include".to_string());
         extra_clang_args.push("-I/opt/homebrew/opt/opencv/include/opencv4".to_string());
-        // Ajout du chemin OpenSSL pour le compilateur
         extra_clang_args.push("-I/opt/homebrew/opt/openssl/include".to_string());
     }
 
