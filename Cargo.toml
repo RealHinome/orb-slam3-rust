@@ -1,0 +1,21 @@
+[package]
+name = "orb-slam3-rs"
+version = "0.1.0"
+edition = "2024"
+
+[[example]]
+name = "drone"
+
+[dependencies]
+autocxx = "0.30.0"
+cxx = "1.0"
+image = "0.25"
+
+[dev-dependencies]
+reqwest = { version = "0.13", features = ["blocking"] }
+flate2 = "1.1"
+
+[build-dependencies]
+autocxx-build = "0.30.0"
+miette = { version = "7", features = ["fancy"] }
+cmake = "0.1"
