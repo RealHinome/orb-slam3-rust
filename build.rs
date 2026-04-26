@@ -1,55 +1,79 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let orb_slam_path = format!("{}/3rdparty/ORB_SLAM3", manifest_dir);
-    let prebuilt_subdir = format!("{}-{}", target_os, target_arch);
-    let prebuilt_path = PathBuf::from(&manifest_dir)
-        .join("prebuilt")
-        .join(&prebuilt_subdir);
+    let manifest_path = Path::new(&manifest_dir);
 
+    let orb_slam_path = manifest_path.join("3rdparty/ORB_SLAM3");
+    let compat_path = manifest_path.join("compat");
+
+    let prebuilt_subdir = format!("{}-{}", target_os, target_arch);
+    let prebuilt_path = manifest_path.join("prebuilt").join(&prebuilt_subdir);
+
+    let mut brew_prefix = "/opt/homebrew".to_string();
     if target_os == "macos" {
+        if let Ok(output) = Command::new("brew").args(["--prefix"]).output() {
+            brew_prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        }
         unsafe {
             env::set_var("MACOSX_DEPLOYMENT_TARGET", "11.0");
-        };
+        }
     }
 
-    let g2o_build_path = Path::new(&manifest_dir).join("3rdparty/ORB_SLAM3/Thirdparty/g2o/build");
-    let g2o_config_h = g2o_build_path.join("config.h");
+    let g2o_source = orb_slam_path.join("Thirdparty/g2o");
+    let g2o_config_h = g2o_source.join("config.h");
 
     if !g2o_config_h.exists() {
-        println!("cargo:warning=G2O config.h not found, generating with CMake...");
-        let _ = std::fs::create_dir_all(&g2o_build_path);
+        println!(
+            "cargo:warning=Generating static g2o config.h at {}",
+            g2o_config_h.display()
+        );
+        let config_content = r#"
+#ifndef G2O_CONFIG_H
+#define G2O_CONFIG_H
 
-        Command::new("cmake")
-            .arg("..")
-            .arg("-DCMAKE_POLICY_VERSION_MINIMUM=3.5")
-            .current_dir(&g2o_build_path)
-            .status()
-            .expect("Failed to build g2O with CMake");
+/* #undef G2O_OPENMP */
+/* #undef G2O_SHARED_LIBS */
+
+#ifdef EIGEN_DEFAULT_TO_ROW_MAJOR
+#  error "g2o requires column major Eigen matrices (see http://eigen.tuxfamily.org/bz/show_bug.cgi?id=422)"
+#endif
+
+#endif
+"#;
+        std::fs::write(&g2o_config_h, config_content).expect("Failed to write g2o config.h");
+    }
+
+    if !prebuilt_path.exists() {
+        let dst = cmake::Config::new(&g2o_source)
+            .define("CMAKE_CXX_STANDARD", "14")
+            .define("CMAKE_CXX_STANDARD_REQUIRED", "ON")
+            .define("G2O_USE_OPENMP", "OFF")
+            .cxxflag(format!("-I{}", compat_path.display()))
+            .no_build_target(true)
+            .build();
+
+        println!("cargo:rustc-link-search=native={}/build", dst.display());
     }
 
     let mut extra_clang_args = vec!["-std=c++14".to_string()];
 
     if target_os == "macos" {
-        let sdk_path = Command::new("xcrun")
-            .args(["--show-sdk-path"])
-            .output()
-            .expect("Failed to get macOS SDK path");
+        if let Ok(output) = Command::new("xcrun").args(["--show-sdk-path"]).output() {
+            let sdk_path = std::str::from_utf8(&output.stdout).unwrap().trim();
+            extra_clang_args.push(format!("-isysroot{}", sdk_path));
+        }
 
-        let sdk_path_str = std::str::from_utf8(&sdk_path.stdout).unwrap().trim();
-        extra_clang_args.push(format!("-isysroot{}", sdk_path_str));
-
-        extra_clang_args.push("-I/opt/homebrew/include".to_string());
-        extra_clang_args.push("-I/opt/homebrew/opt/opencv/include/opencv4".to_string());
-        extra_clang_args.push("-I/opt/homebrew/opt/openssl/include".to_string());
+        extra_clang_args.push(format!("-I{}/include", brew_prefix));
+        extra_clang_args.push(format!("-I{}/opt/opencv/include/opencv4", brew_prefix));
+        extra_clang_args.push(format!("-I{}/opt/openssl/include", brew_prefix));
     }
 
-    let include_path = PathBuf::from("cpp");
+    let include_path = manifest_path.join("cpp");
     let mut b = autocxx_build::Builder::new("src/lib.rs", [&include_path])
         .extra_clang_args(
             &extra_clang_args
@@ -62,19 +86,21 @@ fn main() {
 
     let build = b.flag_if_supported("-std=c++14");
     build
+        .flag_if_supported("-Wno-deprecated-declarations")
+        .flag_if_supported("-Wno-nonportable-include-path")
         .file("cpp/slam_wrapper.cpp")
         .include(&orb_slam_path)
-        .include(format!("{}/include", orb_slam_path))
-        .include(format!("{}/include/CameraModels", orb_slam_path))
-        .include(format!("{}/Thirdparty/Sophus", orb_slam_path))
-        .include(format!("{}/compat", manifest_dir));
+        .include(orb_slam_path.join("include"))
+        .include(orb_slam_path.join("include/CameraModels"))
+        .include(orb_slam_path.join("Thirdparty/Sophus"))
+        .include(&compat_path);
 
     if target_os == "macos" {
         build
-            .include("/opt/homebrew/include")
-            .include("/opt/homebrew/include/eigen3")
-            .include("/opt/homebrew/opt/opencv/include/opencv4")
-            .include("/opt/homebrew/opt/openssl/include");
+            .include(format!("{}/include", brew_prefix))
+            .include(format!("{}/include/eigen3", brew_prefix))
+            .include(format!("{}/opt/opencv/include/opencv4", brew_prefix))
+            .include(format!("{}/opt/openssl/include", brew_prefix));
     } else {
         build
             .include("/usr/include/eigen3")
@@ -86,14 +112,17 @@ fn main() {
     if prebuilt_path.exists() {
         println!("cargo:rustc-link-search=native={}", prebuilt_path.display());
     } else {
-        println!("cargo:rustc-link-search=native={}/lib", orb_slam_path);
+        println!(
+            "cargo:rustc-link-search=native={}/lib",
+            orb_slam_path.display()
+        );
         println!(
             "cargo:rustc-link-search=native={}/Thirdparty/g2o/lib",
-            orb_slam_path
+            orb_slam_path.display()
         );
         println!(
             "cargo:rustc-link-search=native={}/Thirdparty/DBoW2/lib",
-            orb_slam_path
+            orb_slam_path.display()
         );
     }
 
@@ -101,7 +130,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static=g2o");
 
     let dbow_static = prebuilt_path.join("libDBoW2.a");
-    let dbow_submodule_static = Path::new(&orb_slam_path).join("Thirdparty/DBoW2/lib/libDBoW2.a");
+    let dbow_submodule_static = orb_slam_path.join("Thirdparty/DBoW2/lib/libDBoW2.a");
 
     if dbow_static.exists() || dbow_submodule_static.exists() {
         println!("cargo:rustc-link-lib=static=DBoW2");
@@ -110,8 +139,11 @@ fn main() {
     }
 
     if target_os == "macos" {
-        println!("cargo:rustc-link-search=native=/opt/homebrew/lib");
-        println!("cargo:rustc-link-search=native=/opt/homebrew/opt/openssl/lib");
+        println!("cargo:rustc-link-search=native={}/lib", brew_prefix);
+        println!(
+            "cargo:rustc-link-search=native={}/opt/openssl/lib",
+            brew_prefix
+        );
 
         println!("cargo:rustc-link-lib=dylib=opencv_core");
         println!("cargo:rustc-link-lib=dylib=opencv_imgproc");

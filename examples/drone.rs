@@ -1,5 +1,5 @@
 use flate2::read::GzDecoder;
-use orb_slam3_rs::{OrbSlam, SensorType};
+use orb_slam3::{OrbSlam, SensorType};
 use std::fs::File;
 use std::io::{Write, copy};
 use std::path::Path;
